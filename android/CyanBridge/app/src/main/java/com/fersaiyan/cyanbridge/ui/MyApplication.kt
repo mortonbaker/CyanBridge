@@ -31,6 +31,7 @@ import com.fersaiyan.cyanbridge.memoryvault.MemoryVaultBootstrap
 import com.fersaiyan.cyanbridge.devices.DeviceProfileStore
 import com.fersaiyan.cyanbridge.media.autocapture.AutoAudioCapturePrefs
 import com.fersaiyan.cyanbridge.media.autocapture.AutoAudioCaptureService
+import com.fersaiyan.cyanbridge.localmodels.remote.GatewayDiagnostics
 import com.fersaiyan.cyanbridge.localmodels.remote.RemoteOpenAiPrefs
 import com.fersaiyan.cyanbridge.studiobridge.StudioApprovalHandler
 import com.fersaiyan.cyanbridge.studiobridge.StudioBridgeClient
@@ -43,6 +44,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.io.File
+
+private const val GLASSES_GATEWAY_URL = "https://backup.tail00ae77.ts.net:8462/v1"
 
 /**
  * @Author: Hzy
@@ -59,12 +62,30 @@ class MyApplication : Application(){
     var hardwareVersion: String = ""
     var firmwareVersion:String =""
 
+    /**
+     * glasses-gateway fork: on first launch, point Local Models at the operator's gateway
+     * so a fresh install works without typing settings on the phone.
+     */
+    private fun seedGlassesGatewayDefaults() {
+        val prefs = getSharedPreferences("glasses_gateway_fork", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("defaults_seeded_v1", false)) return
+        if (RemoteOpenAiPrefs.getBaseUrl(this).isBlank()) {
+            RemoteOpenAiPrefs.setBaseUrl(this, GLASSES_GATEWAY_URL)
+            RemoteOpenAiPrefs.setModel(this, "auto")
+            RemoteOpenAiPrefs.setEnabled(this, true)
+        }
+        RemoteOpenAiPrefs.setBridgeEnabled(this, false)
+        prefs.edit().putBoolean("defaults_seeded_v1", true).apply()
+    }
+
     override fun onCreate() {
         super.onCreate()
         application = this
         instance = this
         CONTEXT = applicationContext
         if (isLocalModelBenchmarkWorkerProcess()) return
+        seedGlassesGatewayDefaults()
+        GatewayDiagnostics.start(this)
         AppLanguagePreferences.applyStoredLocale(this)
         ProductAnalyticsLifecycle.register(this)
         initBle()

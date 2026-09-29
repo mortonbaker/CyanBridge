@@ -131,6 +131,8 @@ import com.fersaiyan.cyanbridge.ui.requestWifiP2pPermission
 import com.fersaiyan.cyanbridge.ui.setOnClickListener
 import com.fersaiyan.cyanbridge.ui.startKtxActivity
 import com.fersaiyan.cyanbridge.ui.debug.DebugLogSupport
+import com.fersaiyan.cyanbridge.audio.WhisperCapture
+import com.fersaiyan.cyanbridge.localmodels.remote.GatewayDiagnostics
 import com.fersaiyan.cyanbridge.localmodels.remote.RemoteOpenAiPrefs
 import com.fersaiyan.cyanbridge.ui.wifi.p2p.WifiP2pManagerSingleton
 import android.net.wifi.p2p.WifiP2pDevice
@@ -5544,6 +5546,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     speakImageQuestionCue()
                     if (finished || !cont.isActive) return@launch
 
+                    if (WhisperCapture.isEnabled(this@MainActivity)) {
+                        Log.i("ImageQuestionAudio", "Cue complete; capturing question with whisper")
+                        val text = WhisperCapture.listenAndTranscribe(
+                            this@MainActivity,
+                            noSpeechTimeoutMs = timeoutMs,
+                        )
+                        heardSpeech = text != null
+                        if (text == null) GatewayDiagnostics.shipNow(this@MainActivity, "image-question-no-text")
+                        finish(text)
+                        return@launch
+                    }
                     Log.i("ImageQuestionAudio", "Cue complete; creating speech recognizer")
                     recognizer = SpeechRecognizer.createSpeechRecognizer(this@MainActivity)
                     val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -5890,7 +5903,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
         var recognitionAttempts = 0
 
-        recognizer.setRecognitionListener(object : RecognitionListener {
+        val voiceListener = object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
                 Log.i("ImageQuestionAudio", "Voice-query recognizer ready after listening cue")
             }
@@ -5955,6 +5968,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     "Voice query recognition failed with error code=$error " +
                         "attempt=$recognitionAttempts route=${audioRouteSummary(audioManager)}",
                 )
+                GatewayDiagnostics.shipNow(this@MainActivity, "voice-error-$error")
                 Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
                 recognizer.destroy()
                 activeVoiceRecognizer.compareAndSet(recognizer, null)
@@ -6107,7 +6121,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             override fun onPartialResults(partialResults: Bundle?) {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
-        })
+        }
+        recognizer.setRecognitionListener(voiceListener)
 
         val cueUtteranceId = "voice_listening_${System.nanoTime()}"
         val listeningStarted = AtomicBoolean(false)
@@ -6132,8 +6147,34 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     delay(VOICE_CUE_BLUETOOTH_TAIL_MS)
                     Log.i("ImageQuestionAudio", "Starting voice recognizer after listening cue reason=$reason")
                     recognitionAttempts = 1
-                    recognizer.startListening(intent)
-                    started = true
+                    if (WhisperCapture.isEnabled(this@MainActivity)) {
+                        // glasses-gateway fork: record from the glasses mic and transcribe with
+                        // whisper on the gateway instead of Android's SpeechRecognizer.
+                        started = true
+                        lifecycleScope.launch {
+                            val text = WhisperCapture.listenAndTranscribe(this@MainActivity)
+                            if (text.isNullOrBlank()) {
+                                Log.w("AIHijack", "Whisper voice query produced no text")
+                                GatewayDiagnostics.shipNow(this@MainActivity, "whisper-no-text")
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "I couldn't hear a voice question. Please try again.",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                                recognizer.destroy()
+                                activeVoiceRecognizer.compareAndSet(recognizer, null)
+                                stopSco()
+                                finishVoiceQueryWork()
+                            } else {
+                                voiceListener.onResults(Bundle().apply {
+                                    putStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION, arrayListOf(text))
+                                })
+                            }
+                        }
+                    } else {
+                        recognizer.startListening(intent)
+                        started = true
+                    }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (error: Exception) {
